@@ -6,7 +6,7 @@ Change models here to update them everywhere.
 """
 
 # LLM Models (for text generation)
-LLM_MODEL = "anthropic/claude-sonnet-4.5"
+LLM_MODEL = "qwen/qwen3-coder:free"
 
 # Image Models (for image generation)
 IMAGE_MODEL = "google/gemini-3-pro-image-preview"
