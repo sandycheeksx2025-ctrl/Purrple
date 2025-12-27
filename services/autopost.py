@@ -1,13 +1,13 @@
 """
 Agent-based autoposting service.
 
-Stable version with in-memory guards.
+Stable version with persistent duplicate guard and free tier limit enforcement.
 """
 
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Set
 
 from services.database import Database
 from services.llm import LLMClient
@@ -26,6 +26,9 @@ _IS_RUNNING = False
 _LAST_RUN_TS = 0.0
 _MIN_INTERVAL_SECONDS = 60 * 5  # 5 minutes safety
 
+# Persistent duplicate guard (in-memory + DB-backed)
+_RECENT_POSTS_SET: Set[str] = set()
+
 
 def get_agent_system_prompt() -> str:
     tools_desc = get_tools_description()
@@ -33,13 +36,19 @@ def get_agent_system_prompt() -> str:
 
 
 class AutoPostService:
-    """Agent-based autoposting service with guards."""
+    """Agent-based autoposting service with persistent duplicate guard and free tier limit enforcement."""
 
     def __init__(self, db: Database, tier_manager=None):
         self.db = db
         self.llm = LLMClient()
         self.twitter = TwitterClient()
         self.tier_manager = tier_manager
+
+    async def _load_recent_posts(self):
+        """Load recent posts from database into duplicate guard set."""
+        global _RECENT_POSTS_SET
+        posts = await self.db.get_recent_posts_formatted(limit=100)
+        _RECENT_POSTS_SET = set(posts)
 
     def _can_run_now(self) -> bool:
         global _IS_RUNNING, _LAST_RUN_TS
@@ -84,11 +93,22 @@ class AutoPostService:
             return {"success": False, "error": "guard_blocked"}
 
         try:
+            # Load recent posts for duplicate check
+            await self._load_recent_posts()
+
             # Tier guard
             if self.tier_manager:
                 can_post, reason = self.tier_manager.can_post()
                 if not can_post:
                     logger.info(f"[AUTOPOST] Blocked by tier: {reason}")
+                    return {"success": False, "error": reason}
+
+                # Free tier daily post limit enforcement
+                daily_post_limit, _ = self.tier_manager.get_daily_limits()
+                recent_posts_count = await self.db.get_today_post_count()
+                if recent_posts_count >= daily_post_limit:
+                    reason = f"daily_post_limit_reached ({recent_posts_count}/{daily_post_limit})"
+                    logger.info(f"[AUTOPOST] Blocked by daily limit: {reason}")
                     return {"success": False, "error": reason}
 
             logger.info("[AUTOPOST] Starting run")
@@ -155,6 +175,11 @@ Now create your plan.""",
             post_result = await self.llm.chat(messages, POST_TEXT_SCHEMA)
             post_text = post_result["post_text"].strip()
 
+            # Check duplicate post
+            if post_text in _RECENT_POSTS_SET:
+                logger.info("[AUTOPOST] Skipped: duplicate post detected")
+                return {"success": False, "error": "duplicate_post"}
+
             if len(post_text) > 280:
                 post_text = post_text[:277] + "..."
 
@@ -165,6 +190,9 @@ Now create your plan.""",
 
             tweet = await self.twitter.post(post_text, media_ids=media_ids)
             await self.db.save_post(post_text, tweet["id"], image_bytes is not None)
+
+            # Add to in-memory duplicate set
+            _RECENT_POSTS_SET.add(post_text)
 
             duration = round(time.time() - start, 2)
             logger.info(f"[AUTOPOST] Done in {duration}s")
