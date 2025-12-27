@@ -12,7 +12,7 @@ TIER_PRO = "PRO"
 class TierManager:
     """
     Tier manager with in-memory backoff.
-    Prevents hammering X usage endpoint when rate-limited.
+    Safe for free-tier and restart-heavy environments.
     """
 
     def __init__(self, twitter_client):
@@ -24,6 +24,19 @@ class TierManager:
 
         logger.info("[TIER] Initializing tier manager...")
 
+    # -------------------------
+    # Compatibility method
+    # -------------------------
+    async def initialize(self):
+        """
+        Called by main.py on startup.
+        Must exist.
+        """
+        await self.detect_tier()
+
+    # -------------------------
+    # Internal helpers
+    # -------------------------
     def _in_backoff(self) -> bool:
         return (time.time() - self.last_check_ts) < self.backoff_seconds
 
@@ -47,7 +60,6 @@ class TierManager:
 
             self.usage_percent = (used / limit) * 100
 
-            # Very simple inference
             if limit <= 100:
                 self.tier = TIER_FREE
             elif limit <= 1000:
@@ -61,14 +73,13 @@ class TierManager:
             logger.info("==================================================")
 
         except Exception as e:
-            # IMPORTANT: do NOT crash, do NOT retry aggressively
             self.tier = TIER_UNKNOWN
             logger.warning(f"[TIER] Tier detection failed, entering backoff: {e}")
 
+    # -------------------------
+    # Public API
+    # -------------------------
     def can_post(self) -> tuple[bool, str]:
-        """
-        Decide whether posting is allowed.
-        """
         if self.tier == TIER_UNKNOWN:
             return False, "tier_unknown"
 
@@ -82,6 +93,6 @@ class TierManager:
 
     async def maybe_refresh_tier(self):
         """
-        Safe periodic refresh.
+        Safe scheduled refresh.
         """
         await self.detect_tier()
