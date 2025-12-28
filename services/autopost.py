@@ -30,14 +30,21 @@ _MIN_INTERVAL_SECONDS = 60 * 5  # 5 minutes safety
 # -----------------------
 RECENT_POSTS_FILE = Path("recent_posts.json")
 if not RECENT_POSTS_FILE.exists():
-    RECENT_POSTS_FILE.write_text(json.dumps([]))  # Initialize empty list
+    RECENT_POSTS_FILE.write_text(json.dumps([]))
+
 
 def get_agent_system_prompt() -> str:
+    """
+    IMPORTANT:
+    We still describe tools, but the agent is NOT allowed to use images.
+    Image generation is disabled at validation + execution level.
+    """
     tools_desc = get_tools_description()
     return AUTOPOST_AGENT_PROMPT.format(tools_desc=tools_desc)
 
+
 class AutoPostService:
-    """Agent-based autoposting service with both in-memory and persistent duplicate guards."""
+    """Agent-based autoposting service with guards and safe tool handling."""
 
     def __init__(self, db: Database, tier_manager=None):
         self.db = db
@@ -45,6 +52,9 @@ class AutoPostService:
         self.twitter = TwitterClient()
         self.tier_manager = tier_manager
 
+    # -----------------------
+    # Guards
+    # -----------------------
     def _can_run_now(self) -> bool:
         global _IS_RUNNING, _LAST_RUN_TS
 
@@ -65,37 +75,57 @@ class AutoPostService:
         global _IS_RUNNING
         _IS_RUNNING = False
 
-    def _validate_plan(self, plan: list[dict]) -> None:
-        if len(plan) > 3:
-            raise ValueError("Plan too long")
+    # -----------------------
+    # Plan validation (SAFE)
+    # -----------------------
+    def _validate_plan(self, plan: list[dict]) -> list[dict]:
+        """
+        Filters unsupported tools instead of crashing.
+        Image generation is explicitly disabled.
+        """
+        if not plan:
+            return []
 
-        has_image = False
-        for i, step in enumerate(plan):
+        cleaned_plan: list[dict] = []
+
+        for step in plan:
             tool = step.get("tool")
+
+            # Reject unknown tools safely
             if tool not in TOOLS:
-                raise ValueError(f"Unknown tool: {tool}")
+                logger.warning(f"[AUTOPOST] Ignoring unknown tool: {tool}")
+                continue
 
+            # Explicitly block image generation
             if tool == "generate_image":
-                if has_image or i != len(plan) - 1:
-                    raise ValueError("generate_image must be last")
-                has_image = True
+                logger.warning("[AUTOPOST] generate_image ignored (disabled)")
+                continue
 
+            cleaned_plan.append(step)
+
+        return cleaned_plan
+
+    # -----------------------
+    # Duplicate memory
+    # -----------------------
     async def _load_recent_posts(self) -> list[str]:
         try:
             data = json.loads(RECENT_POSTS_FILE.read_text())
             if not isinstance(data, list):
-                data = []
+                return []
+            return data
         except Exception:
-            data = []
-        return data
+            return []
 
     async def _save_recent_post(self, post_text: str) -> None:
         posts = await self._load_recent_posts()
         posts.append(post_text)
-        # Keep last 50 posts
         posts = posts[-50:]
         RECENT_POSTS_FILE.write_text(json.dumps(posts))
 
+    # -----------------------
+    # Main run
+    # -----------------------
     async def run(self) -> dict[str, Any]:
         start = time.time()
 
@@ -121,22 +151,27 @@ class AutoPostService:
                 },
                 {
                     "role": "user",
-                    "content": f"""Create a Twitter post. Here are your previous posts (don't repeat):
+                    "content": f"""Create a Twitter post.
+Here are your previous posts (do not repeat them):
 
 {previous_posts}
 
-Now create your plan.""",
+Create a plan if needed, then write the post.""",
                 },
             ]
 
+            # Ask for plan
             plan_result = await self.llm.chat(messages, PLAN_SCHEMA)
-            plan = plan_result["plan"]
+            raw_plan = plan_result.get("plan", [])
 
-            self._validate_plan(plan)
-            messages.append({"role": "assistant", "content": json.dumps(plan_result)})
+            plan = self._validate_plan(raw_plan)
 
-            image_bytes = None
+            # Record plan (even if empty)
+            messages.append(
+                {"role": "assistant", "content": json.dumps({"plan": plan})}
+            )
 
+            # Execute tools (text-only tools only)
             for step in plan:
                 tool = step["tool"]
                 params = step.get("params", {})
@@ -150,20 +185,14 @@ Now create your plan.""",
                         }
                     )
 
-                elif tool == "generate_image":
-                    image_bytes = await TOOLS[tool](params.get("prompt", ""))
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": "Tool result (generate_image): success",
-                        }
-                    )
+                # No image tools allowed
 
                 reaction = await self.llm.chat(messages, TOOL_REACTION_SCHEMA)
                 messages.append(
                     {"role": "assistant", "content": reaction.get("thinking", "")}
                 )
 
+            # Final tweet
             messages.append(
                 {
                     "role": "user",
@@ -177,19 +206,13 @@ Now create your plan.""",
             if len(post_text) > 280:
                 post_text = post_text[:277] + "..."
 
-            # Duplicate check
             if post_text in previous_posts:
                 logger.info("[AUTOPOST] Duplicate post detected, skipping")
                 return {"success": False, "error": "duplicate_post"}
 
-            media_ids = None
-            if image_bytes:
-                media_id = await self.twitter.upload_media(image_bytes)
-                media_ids = [media_id]
-
-            tweet = await self.twitter.post(post_text, media_ids=media_ids)
+            tweet = await self.twitter.post(post_text)
             await self._save_recent_post(post_text)
-            await self.db.save_post(post_text, tweet["id"], image_bytes is not None)
+            await self.db.save_post(post_text, tweet["id"], include_picture=False)
 
             duration = round(time.time() - start, 2)
             logger.info(f"[AUTOPOST] Done in {duration}s")
