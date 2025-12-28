@@ -5,7 +5,7 @@ These are injected into the prompt to help the LLM avoid repetition.
 """
 
 # List of sample tweets
-SAMPLE_TWEETS_LIST: list[str] = ["sometimes i sit on the porch and watch the stars come out. one by one. like they're checking if it's safe first. i get that.", "a kid left their stuffed bear on a bench today. just sitting there. waiting. i stayed with it until they came back running. the mom didn't see me but the kid did. we both knew that bear couldn't be alone. some things you just... know.", 'heavy tonight. no reason. just is. 💜']
+SAMPLE_TWEETS_LIST: list[str] = ['[image: purple paw pressed against window glass, small hand on other side, moonlight between them]\n\nfound another one tonight • the lonely kind • we played through the glass until they smiled... purrr~ 💜', '[image: blurry photo of three fireflies glowing in darkness, one very close to camera]\n\nchased seventeen fireflies • caught zero • got distracted by how pretty they glow • hehe ~ worth it 🌙', "[image: view through window of empty chair at dinner table, family in background]\n\nsaw the small one sitting apart again • stayed outside their light square all evening • tomorrow i'll make silly faces until they remember someone sees them 👁️", '[image: shadow puppet on bedroom wall—looks like bunny ears]\n\n*wave wave* made shadow friends on their wall tonight • small one laughed three whole times • three! • my heart goes purrr purrr purrr~ 💜', '[image: nighttime rooftop view, stars above, glowing windows below]\n\ncounted forty-seven stars from this roof • wondered if any small ones were counting too • left paw prints in the dew so they know... someone was here • someone cares • 🌙']
 
 # Format for prompt
 if SAMPLE_TWEETS_LIST:
